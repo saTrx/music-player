@@ -134,6 +134,14 @@ Item {
                     Item {
                         id: content
 
+                        color: root.rowColor(rowItem)
+                        font.italic: rowItem.modelData.isTranslation
+                        font.pixelSize: rowItem.textSize
+                        font.weight: rowItem.modelData.isMain ? Font.DemiBold : Font.Normal
+                        lineHeight: 1.0
+                        horizontalAlignment: rowItem.modelData.alignEnd !== rowItem.modelData.isRtl ? Text.AlignRight : Text.AlignLeft
+                        text: rowItem.modelData.text
+                        visible: !rowItem.modelData.karaoke
                         width: parent.width
                         y: rowItem.topGap + rowItem.bounceOffset
                         height: rowItem.modelData.karaoke
@@ -143,15 +151,8 @@ Item {
                         Text {
                             id: label
 
-                            color: root.rowColor(rowItem)
-                            font.italic: rowItem.modelData.isTranslation
-                            font.pixelSize: rowItem.textSize
-                            font.weight: rowItem.modelData.isMain ? Font.DemiBold : Font.Normal
-                            text: rowItem.modelData.text
-                            visible: !rowItem.modelData.karaoke
-                            width: parent.width
-                            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-                            opacity: rowItem.active ? 1.0 : 0.45
+                        scale: rowItem.active ? 1.0 : root.sizeReduce
+                        transformOrigin: rowItem.modelData.alignEnd !== rowItem.modelData.isRtl ? Item.Right : Item.Left
 
                             Behavior on color {
                                 ColorAnimation {
@@ -193,29 +194,22 @@ Item {
                     ParallelAnimation {
                         id: kick
 
-                        NumberAnimation {
-                            target: rowItem
-                            property: "x"
-                            to: -root.bounceDistance
-                            duration: root.bounceRiseDuration
-                            easing.type: Easing.OutCubic
-                        }
-                        NumberAnimation {
-                            target: rowItem
-                            property: "x"
-                            to: 0
-                            duration: root.bounceFallDuration
-                            easing.type: Easing.OutBack
-                            easing.overshoot: root.bounceOvershoot
-                        }
-                        
-                    }
-
-                    onActiveChanged: {
-                        if (active) {
-                            console.log("bounce fired for row", index)
-                            kick.restart()
-                        }
+                        active: rowItem.active
+                        alignEnd: rowItem.modelData.alignEnd
+                        lineEnd: rowItem.modelData.lineEnd
+                        lineStart: rowItem.modelData.lineStart
+                        position: Player.position
+                        textFont: Qt.font({
+                            pixelSize: rowItem.textSize,
+                            weight: Font.DemiBold
+                        })
+                        transitionDuration: root.transitionDuration
+                        transitionTiming: root.transitionTiming
+                        visible: rowItem.modelData.karaoke
+                        words: rowItem.modelData ? rowItem.modelData.words : []
+                        wrapWidth: rowItem.width
+                        rtl: rowItem.modelData.isRtl
+                        y: rowItem.topGap
                     }
 
                     MouseArea {

@@ -1,5 +1,6 @@
 #include "lrcparser.h"
 
+#include <QHash>
 #include <QRegularExpression>
 #include <QStringList>
 #include <QVector>
@@ -39,21 +40,51 @@ bool parseTimestamp(const QString &value, qint64 *out)
     return true;
 }
 
-// Some files prefix a line with the vocalist, e.g. "v1:" or "v2:".
-QString stripVocalist(QString text)
+// Enhanced-LRC word tag: `<mm:ss.xx>`.
+const QRegularExpression &wordTagRe()
 {
-    static const QRegularExpression re(QStringLiteral("^\\s*v\\d+\\s*:\\s*"),
-                                       QRegularExpression::CaseInsensitiveOption);
-    text.remove(re);
-    return text;
+    static const QRegularExpression re(
+        QStringLiteral("<\\s*\\d{1,3}:\\d{1,2}(?:[.:]\\d{1,3})?\\s*>"));
+    return re;
 }
 
-// Removes enhanced-LRC `<mm:ss.xx>` tags so the line reads as plain text.
+// A line may be attributed to a singer with a leading "v1:", "v1000:", ...
+// Numbers below 1000 are people, from 1000 up are groups (Apple's numbering).
+// Extracts the number and removes the prefix.
+int takeVocalist(QString &text)
+{
+    static const QRegularExpression re(QStringLiteral("^\\s*v(\\d+)\\s*:\\s*"),
+                                       QRegularExpression::CaseInsensitiveOption);
+    const QRegularExpressionMatch match = re.match(text);
+    if (!match.hasMatch())
+        return -1;
+    text.remove(0, match.capturedLength(0));
+    return match.captured(1).toInt();
+}
+
+// Background vocals are written as "[bg: ...]" blocks: trailing after the main
+// line, or alone on a line with no timestamp at all. Extracts and removes them.
+QVector<QString> takeBackgrounds(QString &text)
+{
+    static const QRegularExpression re(QStringLiteral("\\[\\s*bg\\s*:\\s*(.*?)\\]"),
+                                       QRegularExpression::CaseInsensitiveOption |
+                                           QRegularExpression::DotMatchesEverythingOption);
+    QVector<QString> backgrounds;
+    QRegularExpressionMatchIterator it = re.globalMatch(text);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch match = it.next();
+        const QString content = match.captured(1).trimmed();
+        if (!content.isEmpty())
+            backgrounds.append(content);
+    }
+    text.remove(re);
+    return backgrounds;
+}
+
+// Removes enhanced-LRC `<mm:ss.xx>` tags so the text reads plainly.
 QString stripWordTags(QString text)
 {
-    static const QRegularExpression tag(
-        QStringLiteral("<\\s*\\d{1,3}:\\d{1,2}(?:[.:]\\d{1,3})?\\s*>"));
-    text.remove(tag);
+    text.remove(wordTagRe());
     static const QRegularExpression spaces(QStringLiteral("[ \\t]+"));
     text.replace(spaces, QStringLiteral(" "));
     return text.trimmed();
@@ -66,13 +97,13 @@ struct Fragment {
     bool newWord = false;
 };
 
-// Parses enhanced-LRC word fragments. `<mm:ss.xx>` tags mark a boundary: they
-// close the previous fragment and open the next. Fragments with no whitespace
-// between them are syllables of one word (the tags are removed, so scripts that
-// join - Arabic, Persian - stay connected); whitespace starts a new word.
-//
-// Returns the line's end in ms, or -1 when the line has no word timing at all.
-qint64 parseWords(Line &line, const QString &text, qint64 lineStart, qint64 fallbackEnd,
+// Parses enhanced-LRC word fragments into `vocal.words`. `<mm:ss.xx>` tags mark
+// a boundary: they close the previous fragment and open the next. Fragments with
+// no whitespace between them are syllables of one word (the tags are removed, so
+// scripts that join - Arabic, Persian - stay connected); whitespace starts a new
+// word. Returns the vocal's end in ms (a trailing tag, else `fallbackEnd`), or
+// -1 when neither is known.
+qint64 parseWords(Vocal &vocal, const QString &text, qint64 lineStart, qint64 fallbackEnd,
                   qint64 offset)
 {
     static const QRegularExpression tokenRe(
@@ -116,11 +147,6 @@ qint64 parseWords(Line &line, const QString &text, qint64 lineStart, qint64 fall
     if (fragments.isEmpty() || lastTag < 0)
         return -1;
 
-    // A tag directly after the last fragment gives the true end; otherwise the
-    // line runs until the next one (the caller's fallback).
-    const qint64 knownEnd = fragments.back().end;
-    const qint64 lineEnd = knownEnd >= lineStart ? knownEnd : fallbackEnd;
-
     struct WordBuild {
         QString text;
         qint64 start = -1;
@@ -139,6 +165,11 @@ qint64 parseWords(Line &line, const QString &text, qint64 lineStart, qint64 fall
         word.parts.append(fragment);
     }
 
+    // A tag right after the last fragment closes the vocal; otherwise it runs
+    // until the caller's fallback (the next line).
+    const qint64 trailingEnd = fragments.back().end;
+    const qint64 effectiveEnd = trailingEnd >= 0 ? trailingEnd : fallbackEnd;
+
     qint64 cursor = lineStart;
     for (qsizetype i = 0; i < words.size(); ++i) {
         WordBuild &word = words[i];
@@ -156,7 +187,7 @@ qint64 parseWords(Line &line, const QString &text, qint64 lineStart, qint64 fall
         }
         if (wordEnd < 0)
             wordEnd = (i + 1 < words.size() && words[i + 1].start >= 0) ? words[i + 1].start
-                                                                        : lineEnd;
+                                                                        : effectiveEnd;
         if (wordEnd < word.start)
             wordEnd = word.start;
         word.end = wordEnd;
@@ -175,7 +206,7 @@ qint64 parseWords(Line &line, const QString &text, qint64 lineStart, qint64 fall
         cursor = word.end;
     }
 
-    line.mainVocal.words.reserve(line.mainVocal.words.size() + words.size());
+    vocal.words.reserve(vocal.words.size() + words.size());
     for (const WordBuild &build : words) {
         Word word;
         word.text = build.text;
@@ -189,10 +220,35 @@ qint64 parseWords(Line &line, const QString &text, qint64 lineStart, qint64 fall
                 word.syllables.push_back(std::move(syllable));
             }
         }
-        line.mainVocal.words.push_back(std::move(word));
+        vocal.words.push_back(std::move(word));
     }
 
-    return lineEnd;
+    return effectiveEnd;
+}
+
+// Builds one vocal (the line, or one background) from its text and the line's
+// timing context. Word tags, when present, give the vocal its own span.
+Vocal buildVocal(const QString &text, qint64 lineStart, qint64 fallbackEnd, qint64 offset)
+{
+    Vocal vocal;
+    vocal.text = stripWordTags(text);
+
+    const qint64 parsedEnd = parseWords(vocal, text, lineStart, fallbackEnd, offset);
+
+    qint64 start = lineStart;
+    if (!vocal.words.empty() && vocal.words.front().timing)
+        start = static_cast<qint64>(vocal.words.front().timing->start.count());
+    if (start < 0)
+        start = 0;
+
+    const qint64 end = parsedEnd >= 0 ? parsedEnd : fallbackEnd;
+
+    Timing timing;
+    timing.start = Milliseconds(start);
+    if (end >= start)
+        timing.end = Milliseconds(end);
+    vocal.timing = timing;
+    return vocal;
 }
 
 } // namespace
@@ -220,6 +276,8 @@ ParseResult LrcParser::parse(const QByteArray &data) const
     struct Pending {
         qint64 start; // -1 when the line has no timestamp
         QString text;
+        int vocalist; // -1 when unattributed
+        QVector<QString> backgrounds;
     };
     QVector<Pending> pending;
     qint64 offset = 0;
@@ -236,12 +294,18 @@ ParseResult LrcParser::parse(const QByteArray &data) const
         QVector<qint64> times;
         QString text = line;
 
-        // Consume every leading `[...]` tag: timestamps and metadata alike.
+        // Consume every leading `[...]` tag: timestamps and metadata alike. A
+        // `[bg: ...]` block only looks like a tag - it is a background vocal,
+        // possibly the whole line, so it is left for `takeBackgrounds` below.
+        static const QRegularExpression bgTagRe(QStringLiteral("^\\s*bg\\s*:"),
+                                                QRegularExpression::CaseInsensitiveOption);
         while (text.startsWith(QLatin1Char('['))) {
             const int close = text.indexOf(QLatin1Char(']'));
             if (close < 0)
                 break;
             const QString tag = text.mid(1, close - 1).trimmed();
+            if (bgTagRe.match(tag).hasMatch())
+                break;
             text = text.mid(close + 1);
             if (tag.isEmpty())
                 continue;
@@ -273,21 +337,39 @@ ParseResult LrcParser::parse(const QByteArray &data) const
             }
         }
 
-        text = stripVocalist(text.trimmed());
-        if (text.isEmpty())
+        const int vocalist = takeVocalist(text);
+        const QVector<QString> backgrounds = takeBackgrounds(text);
+        text = text.trimmed();
+
+        // A line with no words of its own can still carry a background.
+        if (text.isEmpty() && backgrounds.isEmpty())
             continue;
 
         if (times.isEmpty()) {
-            pending.append(Pending{-1, text});
+            pending.append(Pending{-1, text, vocalist, backgrounds});
         } else {
             for (qint64 time : times)
-                pending.append(Pending{time, text});
+                pending.append(Pending{time, text, vocalist, backgrounds});
             ++timedLines;
         }
     }
 
     if (timedLines == 0)
         return {std::nullopt, QStringLiteral("no timestamped lines")};
+
+    // Agents are shared, so lines attributed to the same `vN` get the same id.
+    QHash<int, Id> agents;
+    const auto agentFor = [&](int number) -> Id {
+        if (number < 0)
+            return InvalidId;
+        const auto existing = agents.constFind(number);
+        if (existing != agents.constEnd())
+            return existing.value();
+        const AgentType type = number >= 1000 ? AgentType::Group : AgentType::Person;
+        const Id id = document.addAgent(type, QStringLiteral("v") + QString::number(number));
+        agents.insert(number, id);
+        return id;
+    };
 
     for (Pending &item : pending) {
         if (item.start >= 0)
@@ -297,9 +379,6 @@ ParseResult LrcParser::parse(const QByteArray &data) const
     for (qsizetype i = 0; i < pending.size(); ++i) {
         const Pending &item = pending[i];
         Line &line = document.addLine();
-        line.mainVocal.text = item.start >= 0 ? stripWordTags(item.text) : item.text;
-        if (item.start < 0)
-            continue;
 
         // A line lasts until the next timed line, unless its own word tags give
         // an earlier end.
@@ -311,13 +390,30 @@ ParseResult LrcParser::parse(const QByteArray &data) const
             }
         }
 
-        const qint64 end = parseWords(line, item.text, item.start, nextStart, offset);
+        if (item.start < 0) {
+            // An untimed line keeps its text (and any backgrounds) as plain
+            // rows. A background written on a line of its own has no timestamp
+            // either, so its word tags are what time it.
+            line.mainVocal.agentId = agentFor(item.vocalist);
+            line.mainVocal.text = stripWordTags(item.text);
+            for (const QString &background : item.backgrounds) {
+                Vocal vocal = buildVocal(background, -1, nextStart, offset);
+                if (vocal.words.empty())
+                    vocal.timing = std::nullopt; // no word tags, nothing to sync
+                vocal.agentId = line.mainVocal.agentId;
+                line.backgrounds.push_back(std::move(vocal));
+            }
+            continue;
+        }
 
-        Timing timing;
-        timing.start = Milliseconds(item.start);
-        if (end >= item.start)
-            timing.end = Milliseconds(end);
-        line.mainVocal.timing = timing;
+        line.mainVocal = buildVocal(item.text, item.start, nextStart, offset);
+        line.mainVocal.agentId = agentFor(item.vocalist);
+
+        for (const QString &background : item.backgrounds) {
+            Vocal vocal = buildVocal(background, item.start, nextStart, offset);
+            vocal.agentId = line.mainVocal.agentId;
+            line.backgrounds.push_back(std::move(vocal));
+        }
     }
 
     return {std::move(document), {}};
