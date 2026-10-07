@@ -432,6 +432,7 @@ Item {
                 anchors.topMargin: 26
                 song: page.song
                 visible: !page.showRaw
+                
             }
 
             // Raw lyrics for debug

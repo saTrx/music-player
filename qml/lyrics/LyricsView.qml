@@ -4,46 +4,30 @@ import Karaoke 1.0
 import QtQuick
 import QtQuick.Controls
 
-// The lyric sheet for one Song, driven by its structured lyrics document.
-//
-// Three cases, chosen per line:
-//   * untimed            -> plain normal text, no highlight
-//   * line-level timing  -> the line fades between unsung and sung colours
-//   * word/syllable      -> KaraokeLine, the synced GPU sweep
-//
-// Background vocals and translations are their own smaller rows rather than
-// being hidden under the main line. Clicking a timed row seeks to its start.
 Item {
     id: root
 
     property Song song
     property int transitionDuration: 1000
     property int transitionTiming: Easing.InOutQuart
-    // Start a line's transition this many milliseconds before its real start, so
-    // the fade is complete by the time it is actually sung. The same look-ahead
-    // makes the previous line start fading out 500 ms early. Defaults to half the
-    // transition duration. This only shifts *which* line is active; the synced
-    // word sweep still follows the real playback position.
     property int activationLeadMs: Math.round(transitionDuration / 2)
 
     readonly property var document: root.song ? root.song.document : null
     readonly property real positionMs: Player.position * 1000
     readonly property bool timed: root.document ? root.document.timed : false
-    // The active line is picked slightly ahead of the clock so the transition
-    // finishes on the beat; the karaoke sweep still follows the real position.
     readonly property real effectivePositionMs: positionMs + activationLeadMs
-    // Rows can overlap, and more than one can be active at once; this is the
-    // topmost one, and the view scrolls to it.
     readonly property int firstActiveRow: root.document ? root.document.firstActiveRow(effectivePositionMs) : -1
     readonly property real lineSize: Math.max(20, Math.min(32, width * 0.075))
 
-    property real sizeReduce: 0.94           // how much smaller the unsung line gets
+  
+    property real bounceDistance: 16 
+    property int bounceRiseDuration: 160 
+    property int bounceFallDuration: 840 
+    property real bounceOvershoot: 6 
 
     onFirstActiveRowChanged: if (root.firstActiveRow >= 0)
-        scroller.centerOn(root.firstActiveRow)
+    scroller.centerOn(root.firstActiveRow)
 
-    // Colour of one plain row, by kind and whether it is the current line. With
-    // no timing at all every line is simply normal text.
     function rowColor(item) {
         var row = item.modelData;
         if (row.isSection || row.isInstrumental)
@@ -91,16 +75,18 @@ Item {
         ScrollBar.vertical: ScrollBar {}
 
         onDraggingChanged: if (dragging)
-            smoothscrolling.stop()
+        smoothscrolling.stop()
         onHeightChanged: contentY = Math.min(contentY, Math.max(0, contentHeight - height))
 
-        NumberAnimation {
+        
+        SpringAnimation {
             id: smoothscrolling
-
-            duration: root.transitionDuration
-            easing.type: root.transitionTiming
             property: "contentY"
             target: scroller
+            spring: 3
+            damping: 1.0
+            mass: 8
+            
         }
 
         Column {
@@ -125,70 +111,121 @@ Item {
                     required property int index
                     required property var modelData
 
-                    readonly property bool active: root.timed && modelData.activeStartMs >= 0 && root.effectivePositionMs >= modelData.activeStartMs && (modelData.activeEndMs < 0 || root.effectivePositionMs < modelData.activeEndMs)
-                    readonly property real textSize: modelData.isMain ? root.lineSize : (modelData.isSection ? root.lineSize * 0.6 : (modelData.isInstrumental ? root.lineSize * 0.62 : root.lineSize * 0.7))
+                    readonly property bool active: root.timed
+                                                   && modelData.activeStartMs >= 0
+                                                   && root.effectivePositionMs >= modelData.activeStartMs
+                                                   && (modelData.activeEndMs < 0 || root.effectivePositionMs < modelData.activeEndMs)
+                    readonly property real textSize: modelData.isMain
+                                                     ? root.lineSize
+                                                     : (modelData.isSection
+                                                        ? root.lineSize * 0.6
+                                                        : (modelData.isInstrumental
+                                                           ? root.lineSize * 0.62
+                                                           : root.lineSize * 0.7))
                     readonly property real topGap: modelData.groupStart ? 18 : 4
 
-                    height: topGap + (modelData.karaoke ? karaokeLine.height : label.height)
+                    
+                    property real bounceOffset: 0
+
                     width: scroller.width
+                    height: topGap + content.height
 
-                    Text {
-                        id: label
+                   
+                    Item {
+                        id: content
 
-                        color: root.rowColor(rowItem)
-                        font.italic: rowItem.modelData.isTranslation
-                        font.pixelSize: rowItem.textSize
-                        font.weight: rowItem.modelData.isMain ? Font.DemiBold : Font.Normal
-                        text: rowItem.modelData.text
-                        visible: !rowItem.modelData.karaoke
                         width: parent.width
-                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-                        y: rowItem.topGap
+                        y: rowItem.topGap + rowItem.bounceOffset
+                        height: rowItem.modelData.karaoke
+                                ? karaokeLine.height
+                                : label.height
+                            
+                        Text {
+                            id: label
 
-                        scale: rowItem.active ? 1.0 : root.sizeReduce
-                        transformOrigin: rowItem.modelData.isRtl ? Item.Right : Item.Left
+                            color: root.rowColor(rowItem)
+                            font.italic: rowItem.modelData.isTranslation
+                            font.pixelSize: rowItem.textSize
+                            font.weight: rowItem.modelData.isMain ? Font.DemiBold : Font.Normal
+                            text: rowItem.modelData.text
+                            visible: !rowItem.modelData.karaoke
+                            width: parent.width
+                            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                            opacity: rowItem.active ? 1.0 : 0.45
 
-                        Behavior on color {
-                            ColorAnimation {
-                                duration: root.transitionDuration
-                                easing.type: root.transitionTiming
+                            Behavior on color {
+                                ColorAnimation {
+                                    duration: root.transitionDuration
+                                    easing.type: root.transitionTiming
+                                }
                             }
+                            Behavior on opacity {
+                                NumberAnimation {
+                                    duration: root.transitionDuration
+                                    easing.type: root.transitionTiming
+                                }
+                            }
+                            
                         }
 
-                        Behavior on scale {
-                            NumberAnimation {
-                                duration: root.transitionDuration
-                                easing.type: root.transitionTiming
-                            }
+                        KaraokeLine {
+                            id: karaokeLine
+
+                            active: rowItem.active
+                            lineEnd: rowItem.modelData.lineEnd
+                            lineStart: rowItem.modelData.lineStart
+                            position: Player.position
+                            textFont: Qt.font({
+                                                  pixelSize: rowItem.textSize,
+                                                  weight: Font.DemiBold
+                                              })
+                            transitionDuration: root.transitionDuration
+                            transitionTiming: root.transitionTiming
+                            visible: rowItem.modelData.karaoke
+                            words: rowItem.modelData ? rowItem.modelData.words : []
+                            wrapWidth: rowItem.width
+                            rtl: rowItem.modelData.isRtl
+                            width: parent.width
                         }
                     }
 
-                    KaraokeLine {
-                        id: karaokeLine
+                    
+                    ParallelAnimation {
+                        id: kick
 
-                        active: rowItem.active
-                        lineEnd: rowItem.modelData.lineEnd
-                        lineStart: rowItem.modelData.lineStart
-                        position: Player.position
-                        textFont: Qt.font({
-                            pixelSize: rowItem.textSize,
-                            weight: Font.DemiBold
-                        })
-                        transitionDuration: root.transitionDuration
-                        transitionTiming: root.transitionTiming
-                        visible: rowItem.modelData.karaoke
-                        words: rowItem.modelData ? rowItem.modelData.words : []
-                        wrapWidth: rowItem.width
-                        rtl: rowItem.modelData.isRtl
-                        y: rowItem.topGap
+                        NumberAnimation {
+                            target: rowItem
+                            property: "x"
+                            to: -root.bounceDistance
+                            duration: root.bounceRiseDuration
+                            easing.type: Easing.OutCubic
+                        }
+                        NumberAnimation {
+                            target: rowItem
+                            property: "x"
+                            to: 0
+                            duration: root.bounceFallDuration
+                            easing.type: Easing.OutBack
+                            easing.overshoot: root.bounceOvershoot
+                        }
+                        
+                    }
+
+                    onActiveChanged: {
+                        if (active) {
+                            console.log("bounce fired for row", index)
+                            kick.restart()
+                        }
                     }
 
                     MouseArea {
                         anchors.fill: parent
-                        cursorShape: rowItem.modelData.startMs >= 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        cursorShape: rowItem.modelData.startMs >= 0
+                                     ? Qt.PointingHandCursor
+                                     : Qt.ArrowCursor
 
                         onClicked: if (rowItem.modelData.startMs >= 0)
-                            Player.seek(rowItem.modelData.startMs / 1000.0)
+                        Player.seek(rowItem.modelData.startMs / 1000.0)
                     }
                 }
             }
