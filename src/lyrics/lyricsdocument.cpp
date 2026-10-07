@@ -1,5 +1,6 @@
 #include "lyricsdocument.h"
 
+#include <QHash>
 #include <QStringList>
 #include <QVector>
 
@@ -148,19 +149,19 @@ struct Window {
 
 TimedWord::TimedWord(QString text, qreal start, qreal end, QObject *parent)
     : QObject(parent), m_text(std::move(text)), m_start(start), m_end(end)
-{
-}
+{}
 
 // ---------------------------------------------------------------------------
 // LyricRow
 // ---------------------------------------------------------------------------
 
-LyricRow::LyricRow(Kind kind, QString text, QString agentName, qint64 startMs, qint64 activeStartMs,
-                   qint64 activeEndMs, bool groupStart, Timed timed, QObject *parent)
+LyricRow::LyricRow(Kind kind, QString text, QString agentName, bool agentIsGroup, bool alignEnd,
+                   qint64 startMs, qint64 activeStartMs, qint64 activeEndMs, bool groupStart,
+                   Timed timed, QObject *parent)
     : QObject(parent), m_kind(kind), m_text(std::move(text)), m_agentName(std::move(agentName)),
-      m_startMs(startMs), m_activeStartMs(activeStartMs), m_activeEndMs(activeEndMs),
-      m_groupStart(groupStart), m_karaoke(timed.karaoke), m_lineStart(timed.lineStart),
-      m_lineEnd(timed.lineEnd)
+      m_agentIsGroup(agentIsGroup), m_alignEnd(alignEnd), m_startMs(startMs),
+      m_activeStartMs(activeStartMs), m_activeEndMs(activeEndMs), m_groupStart(groupStart),
+      m_karaoke(timed.karaoke), m_lineStart(timed.lineStart), m_lineEnd(timed.lineEnd)
 {
     m_isRtl = lyrics::textDirection(m_text) == lyrics::TextDirection::Rtl;
     m_words.reserve(timed.words.size());
@@ -184,22 +185,24 @@ void LyricsDocument::setLyrics(lyrics::Lyrics &&document)
 }
 
 LyricRow *LyricsDocument::addRow(LyricRow::Kind kind, const QString &text, const QString &agentName,
-                                 qint64 startMs, qint64 activeStartMs, qint64 activeEndMs,
-                                 bool groupStart, LyricRow::Timed timed)
+                                 bool agentIsGroup, bool alignEnd, qint64 startMs,
+                                 qint64 activeStartMs, qint64 activeEndMs, bool groupStart,
+                                 LyricRow::Timed timed)
 {
-    auto *row = new LyricRow(kind, text, agentName, startMs, activeStartMs, activeEndMs, groupStart,
-                             std::move(timed), this);
+    auto *row = new LyricRow(kind, text, agentName, agentIsGroup, alignEnd, startMs, activeStartMs,
+                             activeEndMs, groupStart, std::move(timed), this);
     if (activeStartMs >= 0)
         m_timed = true;
     m_rows.append(row);
     return row;
 }
 
-QString LyricsDocument::agentName(lyrics::Id id) const
+void LyricsDocument::resolveAgent(lyrics::Id id, QString *name, bool *isGroup) const
 {
-    if (const lyrics::Agent *agent = m_lyrics.agent(id))
-        return agent->name;
-    return {};
+    if (const lyrics::Agent *agent = m_lyrics.agent(id)) {
+        *name = agent->name;
+        *isGroup = agent->type == lyrics::AgentType::Group;
+    }
 }
 
 void LyricsDocument::rebuild()
@@ -249,14 +252,35 @@ void LyricsDocument::rebuild()
             windows[i].end = windows[i].start;
     }
 
+    // Different singers are placed on opposite sides, alternating in the order
+    // they first appear (the classic duet layout).
+    QHash<quint64, bool> agentSides;
+    bool nextEnd = false;
+    // Side of the last attributed line, inherited by background-only lines.
+    bool lastAlignEnd = false;
+    const auto alignEndFor = [&](lyrics::Id id) -> bool {
+        if (id == lyrics::InvalidId)
+            return false;
+        const quint64 key = static_cast<quint64>(id);
+        const auto it = agentSides.constFind(key);
+        if (it != agentSides.constEnd())
+            return it.value();
+        const bool end = nextEnd;
+        agentSides.insert(key, end);
+        nextEnd = !nextEnd;
+        return end;
+    };
+
     // Second pass: emit the rows.
     for (qsizetype i = 0; i < windows.size(); ++i) {
         const Window &window = windows[i];
-        const std::unique_ptr<lyrics::Element> &element = m_lyrics.elements()[static_cast<std::size_t>(i)];
+        const std::unique_ptr<lyrics::Element> &element =
+            m_lyrics.elements()[static_cast<std::size_t>(i)];
         switch (element->kind()) {
         case lyrics::ElementKind::Section: {
             const auto *section = static_cast<const lyrics::Section *>(element.get());
-            addRow(LyricRow::Section, section->name, {}, window.start, window.start, window.end, true);
+            addRow(LyricRow::Section, section->name, {}, false, false, window.start, window.start,
+                   window.end, true);
             break;
         }
         case lyrics::ElementKind::Instrumental: {
@@ -264,31 +288,71 @@ void LyricsDocument::rebuild()
             const QString text = instrumental->description.isEmpty()
                                      ? QStringLiteral("\u266A instrumental")
                                      : instrumental->description;
-            addRow(LyricRow::Instrumental, text, {}, window.start, window.start, window.end, true);
+            addRow(LyricRow::Instrumental, text, {}, false, false, window.start, window.start,
+                   window.end, true);
             break;
         }
         case lyrics::ElementKind::Line: {
             const auto *line = static_cast<const lyrics::Line *>(element.get());
 
-            addRow(LyricRow::Main, line->mainVocal.text, agentName(line->mainVocal.agentId),
-                   window.start, window.start, window.end, true,
-                   buildTimed(line->mainVocal, window.start, window.end));
+            // A line that is nothing but backgrounds has no singer of its own;
+            // it backs the line before it, so it takes that line's side.
+            const bool bgOnly = line->mainVocal.text.trimmed().isEmpty() &&
+                                line->mainVocal.agentId == lyrics::InvalidId;
 
-            // Translations inherit the line's timing, so they highlight with it
-            // and a click seeks to the line's start.
-            for (const lyrics::Translation &translation : line->translations)
-                addRow(LyricRow::Translation, translation.text, {}, window.start, window.start,
-                       window.end, false);
+            QString who;
+            bool isGroup = false;
+            resolveAgent(line->mainVocal.agentId, &who, &isGroup);
+            const bool alignEnd = alignEndFor(line->mainVocal.agentId);
+            const bool rowAlignEnd = bgOnly ? lastAlignEnd : alignEnd;
+            if (!bgOnly)
+                lastAlignEnd = alignEnd;
 
-            // Background vocals carry their own timing when the source gives it.
+            bool firstRow = true;
+            if (!line->mainVocal.text.trimmed().isEmpty()) {
+                addRow(LyricRow::Main, line->mainVocal.text, who, isGroup, rowAlignEnd,
+                       window.start, window.start, window.end, firstRow,
+                       buildTimed(line->mainVocal, window.start, window.end));
+                firstRow = false;
+            }
+
+            // Translations inherit the line's timing (and side), so they
+            // highlight with it and a click seeks to the line's start.
+            for (const lyrics::Translation &translation : line->translations) {
+                addRow(LyricRow::Translation, translation.text, {}, false, rowAlignEnd,
+                       window.start, window.start, window.end, firstRow);
+                firstRow = false;
+            }
+
+            // Background vocals carry their own timing and singer when the
+            // source gives them.
             for (const lyrics::Vocal &background : line->backgrounds) {
-                const qint64 backgroundStart =
+                // A background inherits the line's window only as a fallback;
+                // word timing narrows it to the span the words are actually
+                // sung in, so several backgrounds under one line light up one
+                // after another instead of all at once.
+                qint64 backgroundStart =
                     background.timing ? toMs(background.timing->start) : window.start;
-                const qint64 backgroundEnd = (background.timing && background.timing->end)
-                                                 ? toMs(*background.timing->end)
-                                                 : window.end;
-                addRow(LyricRow::Background, background.text, agentName(background.agentId),
-                       backgroundStart, backgroundStart, backgroundEnd, false);
+                qint64 backgroundEnd = (background.timing && background.timing->end)
+                                           ? toMs(*background.timing->end)
+                                           : window.end;
+                LyricRow::Timed timed =
+                    buildTimed(background, background.timing ? backgroundStart : -1,
+                               background.timing && background.timing->end ? backgroundEnd : -1);
+                if (timed.karaoke && !background.timing) {
+                    backgroundStart = qRound64(timed.lineStart * 1000.0);
+                    backgroundEnd = qRound64(timed.lineEnd * 1000.0);
+                }
+
+                QString backgroundWho;
+                bool backgroundIsGroup = false;
+                resolveAgent(background.agentId, &backgroundWho, &backgroundIsGroup);
+                // A background sits on the same side as the line it backs, so
+                // it stays under its own singer instead of swapping sides.
+                addRow(LyricRow::Background, background.text, backgroundWho, backgroundIsGroup,
+                       rowAlignEnd, backgroundStart, backgroundStart, backgroundEnd, firstRow,
+                       std::move(timed));
+                firstRow = false;
             }
             break;
         }

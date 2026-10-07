@@ -139,6 +139,8 @@ Item {
                         font.italic: rowItem.modelData.isTranslation
                         font.pixelSize: rowItem.textSize
                         font.weight: rowItem.modelData.isMain ? Font.DemiBold : Font.Normal
+                        lineHeight: 1.0
+                        horizontalAlignment: rowItem.modelData.alignEnd !== rowItem.modelData.isRtl ? Text.AlignRight : Text.AlignLeft
                         text: rowItem.modelData.text
                         visible: !rowItem.modelData.karaoke
                         width: parent.width
@@ -146,7 +148,7 @@ Item {
                         y: rowItem.topGap
 
                         scale: rowItem.active ? 1.0 : root.sizeReduce
-                        transformOrigin: rowItem.modelData.isRtl ? Item.Right : Item.Left
+                        transformOrigin: rowItem.modelData.alignEnd !== rowItem.modelData.isRtl ? Item.Right : Item.Left
 
                         Behavior on color {
                             ColorAnimation {
@@ -167,6 +169,7 @@ Item {
                         id: karaokeLine
 
                         active: rowItem.active
+                        alignEnd: rowItem.modelData.alignEnd
                         lineEnd: rowItem.modelData.lineEnd
                         lineStart: rowItem.modelData.lineStart
                         position: Player.position

@@ -52,6 +52,7 @@ qt_add_qml_module(karaoke
 
         # shared visual components
         qml/components/Artwork.qml
+        qml/components/WordFlow.qml
 
         # lyrics feature
         qml/lyrics/LyricsView.qml

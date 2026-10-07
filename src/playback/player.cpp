@@ -28,7 +28,7 @@ Player::Player(QObject *parent) : QObject(parent)
 
     m_bus = gst_element_get_bus(m_playbin);
 
-    m_pollTimer.setInterval(100);
+    m_pollTimer.setInterval(10);
     connect(&m_pollTimer, &QTimer::timeout, this, &Player::poll);
     m_pollTimer.start();
 }

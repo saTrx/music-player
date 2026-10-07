@@ -58,6 +58,10 @@ class LyricRow : public QObject {
 
     Q_PROPERTY(QString text READ text CONSTANT)
     Q_PROPERTY(QString agentName READ agentName CONSTANT)
+    Q_PROPERTY(bool agentIsGroup READ agentIsGroup CONSTANT)
+    /// True when this row belongs to the second (alternating) singer, so the
+    /// view aligns it to the opposite side of the previous singer.
+    Q_PROPERTY(bool alignEnd READ alignEnd CONSTANT)
     Q_PROPERTY(bool isMain READ isMain CONSTANT)
     Q_PROPERTY(bool isBackground READ isBackground CONSTANT)
     Q_PROPERTY(bool isTranslation READ isTranslation CONSTANT)
@@ -105,12 +109,15 @@ class LyricRow : public QObject {
         qreal lineEnd = 0.0;
     };
 
-    LyricRow(Kind kind, QString text, QString agentName, qint64 startMs, qint64 activeStartMs,
-             qint64 activeEndMs, bool groupStart, Timed timed, QObject *parent = nullptr);
+    LyricRow(Kind kind, QString text, QString agentName, bool agentIsGroup, bool alignEnd,
+             qint64 startMs, qint64 activeStartMs, qint64 activeEndMs, bool groupStart, Timed timed,
+             QObject *parent = nullptr);
 
     Kind kind() const { return m_kind; }
     QString text() const { return m_text; }
     QString agentName() const { return m_agentName; }
+    bool agentIsGroup() const { return m_agentIsGroup; }
+    bool alignEnd() const { return m_alignEnd; }
 
     bool isMain() const { return m_kind == Main; }
     bool isBackground() const { return m_kind == Background; }
@@ -133,6 +140,8 @@ class LyricRow : public QObject {
     Kind m_kind;
     QString m_text;
     QString m_agentName;
+    bool m_agentIsGroup = false;
+    bool m_alignEnd = false;
     qint64 m_startMs;
     qint64 m_activeStartMs;
     qint64 m_activeEndMs;
@@ -180,9 +189,9 @@ class LyricsDocument : public QObject {
   private:
     void rebuild();
     LyricRow *addRow(LyricRow::Kind kind, const QString &text, const QString &agentName,
-                     qint64 startMs, qint64 activeStartMs, qint64 activeEndMs, bool groupStart,
-                     LyricRow::Timed timed = {});
-    QString agentName(lyrics::Id id) const;
+                     bool agentIsGroup, bool alignEnd, qint64 startMs, qint64 activeStartMs,
+                     qint64 activeEndMs, bool groupStart, LyricRow::Timed timed = {});
+    void resolveAgent(lyrics::Id id, QString *name, bool *isGroup) const;
 
     lyrics::Lyrics m_lyrics;
     bool m_hasLyrics = false;
